@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"clippy-backend/internal/config"
 	"clippy-backend/internal/db"
 
 	"github.com/gorilla/mux"
@@ -21,29 +22,66 @@ type Server struct {
 	store     *db.Store
 	router    *mux.Router
 	imagesDir string
+	apiToken  string
 }
 
-func New(store *db.Store, staticDir string, imagesDir string) *Server {
+func New(store *db.Store, staticDir string, imagesDir string, dataDir string, apiToken string) *Server {
+	config.Load(dataDir)
+
 	s := &Server{
 		store:     store,
 		router:    mux.NewRouter(),
 		imagesDir: imagesDir,
+		apiToken:  apiToken,
 	}
 	s.routes(staticDir)
 	return s
 }
 
 func (s *Server) routes(staticDir string) {
-	// CORS middleware
+	// Auth + CORS middleware
 	s.router.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			// Allow static UI files and images without token (served to local WebView)
+			path := r.URL.Path
+			isAPI := strings.HasPrefix(path, "/api/")
+
+			// Tighten CORS — only allow local origins
+			origin := r.Header.Get("Origin")
+			allowedOrigin := false
+			if origin == "" || origin == "null" || origin == "file://" {
+				allowedOrigin = true
+			} else if origin == "http://localhost" || strings.HasPrefix(origin, "http://localhost:") {
+				allowedOrigin = true
+			} else if origin == "http://127.0.0.1" || strings.HasPrefix(origin, "http://127.0.0.1:") {
+				allowedOrigin = true
+			}
+			if allowedOrigin {
+				if origin == "null" || origin == "" {
+					w.Header().Set("Access-Control-Allow-Origin", "null")
+				} else {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+				}
+			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Clippy-Token")
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(200)
 				return
 			}
+
+			// Token validation for API routes (except /api/health for liveness check)
+			if isAPI && path != "/api/health" {
+				token := r.Header.Get("X-Clippy-Token")
+				if token == "" {
+					token = r.URL.Query().Get("token")
+				}
+				if token != s.apiToken {
+					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					return
+				}
+			}
+
 			next.ServeHTTP(w, r)
 		})
 	})
@@ -53,11 +91,16 @@ func (s *Server) routes(staticDir string) {
 	api.HandleFunc("/clips", s.handleList).Methods("GET")
 	api.HandleFunc("/clips", s.handleCreate).Methods("POST")
 	api.HandleFunc("/clips/image", s.handleImageUpload).Methods("POST")
+	api.HandleFunc("/clips/recent", s.handleDeleteRecent).Methods("DELETE")
+	api.HandleFunc("/clips/export", s.handleExport).Methods("GET")
 	api.HandleFunc("/clips/{id}", s.handleDelete).Methods("DELETE")
 	api.HandleFunc("/clips/{id}/pin", s.handlePin).Methods("PUT")
 	api.HandleFunc("/clips/{id}/copy", s.handleCopy).Methods("POST")
-	api.HandleFunc("/clips/export", s.handleExport).Methods("GET")
 	api.HandleFunc("/health", s.handleHealth).Methods("GET")
+	api.HandleFunc("/settings", s.handleGetSettings).Methods("GET")
+	api.HandleFunc("/settings", s.handleUpdateSettings).Methods("PUT")
+	api.HandleFunc("/pause", s.handlePause).Methods("POST")
+	api.HandleFunc("/resume", s.handleResume).Methods("POST")
 
 	// Image serving
 	s.router.HandleFunc("/images/{filename}", s.handleImage).Methods("GET")
@@ -275,7 +318,89 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	paused := config.IsPaused()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"version": "1.2.1",
+		"paused":  paused,
+	})
+}
+
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Get()
+	response := map[string]interface{}{
+		"retention_hours": cfg.RetentionHours,
+		"ignored_apps":    cfg.IgnoredApps,
+		"max_items":       cfg.MaxItems,
+		"paste_directly":  cfg.PasteDirectly,
+		"paused_until":    cfg.PausedUntil,
+		"is_paused":       config.IsPaused(),
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	var newCfg config.Config
+	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+		http.Error(w, "invalid body", 400)
+		return
+	}
+	if err := config.Update(&newCfg); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	log.Printf("⚙️ Settings updated: retention=%dh, ignored=%v, paste_directly=%v",
+		newCfg.RetentionHours, newCfg.IgnoredApps, newCfg.PasteDirectly)
+	json.NewEncoder(w).Encode(config.Get())
+}
+
+func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Minutes int `json:"minutes"` // 5, 15, 30, 60
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Minutes <= 0 {
+		http.Error(w, "invalid body: need {\"minutes\": N}", 400)
+		return
+	}
+	if req.Minutes > 1440 { // max 24h
+		req.Minutes = 1440
+	}
+	config.Pause(time.Duration(req.Minutes) * time.Minute)
+	log.Printf("⏸️ Recording paused for %d minutes", req.Minutes)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "paused",
+		"minutes":     req.Minutes,
+		"paused_until": config.Get().PausedUntil,
+	})
+}
+
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	config.Resume()
+	log.Printf("▶️ Recording resumed")
+	json.NewEncoder(w).Encode(map[string]string{"status": "resumed"})
+}
+
+func (s *Server) handleDeleteRecent(w http.ResponseWriter, r *http.Request) {
+	minutesStr := r.URL.Query().Get("minutes")
+	minutes, err := strconv.Atoi(minutesStr)
+	if err != nil || minutes <= 0 {
+		http.Error(w, "need ?minutes=N (5, 15, 30)", 400)
+		return
+	}
+	if minutes > 1440 {
+		minutes = 1440
+	}
+	count, err := s.store.DeleteRecent(minutes)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	log.Printf("🗑️ Cleared %d clips from last %d minutes", count, minutes)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "cleared",
+		"deleted": count,
+		"minutes": minutes,
+	})
 }
 
 func detectType(content string) string {

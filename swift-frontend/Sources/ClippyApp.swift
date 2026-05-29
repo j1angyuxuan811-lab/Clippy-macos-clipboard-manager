@@ -2,19 +2,81 @@ import SwiftUI
 import WebKit
 import Cocoa
 import Foundation
+import Carbon.HIToolbox
 
 // ── JS Bridge: handles clipboard operations from WebView ──
 class ClippyBridge: NSObject, WKScriptMessageHandler {
+    weak var appDelegate: AppDelegate?
+
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let dict = message.body as? [String: Any],
               let action = dict["action"] as? String else { return }
 
-        if action == "copyImage" {
+        switch action {
+        case "copyImage":
             guard let path = dict["path"] as? String else {
                 print("❌ copyImage: missing path")
                 return
             }
             copyImageToClipboard(path: path)
+        case "pasteText":
+            guard let text = dict["text"] as? String else { return }
+            pasteTextToActiveApp(text: text)
+        case "hidePanel":
+            DispatchQueue.main.async { [weak self] in
+                self?.appDelegate?.hidePanel()
+            }
+        case "getStatus":
+            // Return hotkey/accessibility status to WebView
+            DispatchQueue.main.async { [weak self] in
+                self?.sendStatusToWebView()
+            }
+        case "settingsChanged":
+            // Immediate sync when WebView saves settings
+            if let pd = dict["paste_directly"] as? Bool {
+                DispatchQueue.main.async { [weak self] in
+                    self?.appDelegate?.pasteDirectly = pd
+                    print("⚡ paste_directly updated immediately: \(pd)")
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    private func sendStatusToWebView() {
+        guard let delegate = appDelegate, let webView = delegate.webView else { return }
+        let statusJSON: [String: Any] = [
+            "hotkey_registered": delegate.hotkeyRegistered,
+            "hotkey_method": delegate.hotkeyMethod,
+            "hotkey_combo": "⌘⇧V",
+            "accessibility_granted": delegate.accessibilityGranted,
+            "paste_directly": delegate.pasteDirectly
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: statusJSON),
+           let json = String(data: data, encoding: .utf8) {
+            let script = "window._clippyStatus = \(json); if (window._onClippyStatus) window._onClippyStatus(\(json));"
+            webView.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+
+    private func pasteTextToActiveApp(text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        // Hide panel first, then paste
+        DispatchQueue.main.async { [weak self] in
+            self?.appDelegate?.hidePanel()
+
+            // Only simulate Cmd+V if accessibility is granted AND paste_directly is enabled
+            let delegate = self?.appDelegate
+            if delegate?.accessibilityGranted == true && delegate?.pasteDirectly == true {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    self?.simulatePaste()
+                }
+            }
+            // Otherwise content is on clipboard, user can Cmd+V manually
         }
     }
 
@@ -22,7 +84,6 @@ class ClippyBridge: NSObject, WKScriptMessageHandler {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
 
-        // Try reading the image file
         let url = URL(fileURLWithPath: path)
         guard let image = NSImage(contentsOf: url) else {
             print("❌ Failed to load image: \(path)")
@@ -32,7 +93,18 @@ class ClippyBridge: NSObject, WKScriptMessageHandler {
         pasteboard.writeObjects([image])
         print("📋 Image copied to clipboard: \(path)")
 
-        // Simulate Cmd+V to paste into the active app
+        DispatchQueue.main.async { [weak self] in
+            self?.appDelegate?.hidePanel()
+            let delegate = self?.appDelegate
+            if delegate?.accessibilityGranted == true && delegate?.pasteDirectly == true {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    self?.simulatePaste()
+                }
+            }
+        }
+    }
+
+    private func simulatePaste() {
         let src = CGEventSource(stateID: .combinedSessionState)
         let cmdDown = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true) // V
         cmdDown?.flags = .maskCommand
@@ -53,8 +125,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var clickLocalMonitor: Any?
     var hotkeyGlobalMonitor: Any?
     var hotkeyLocalMonitor: Any?
-    var clipboardMonitor: Timer?
-    var lastImageHash: Int = 0
+    var bridge: ClippyBridge!
+    var accessibilityGranted = false
+    var carbonHotkeyRef: EventHotKeyRef?
+    var hotkeyRegistered = false
+    var hotkeyMethod = "none" // "carbon", "nsevent", "none"
+    var pasteDirectly = true  // synced from backend settings
+    var apiToken = ""         // per-session token read from data dir
 
     private let backendURL: URL = {
         let appBundleURL = Bundle.main.bundleURL
@@ -68,131 +145,187 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return URL(fileURLWithPath: "/Users/qq/workspace/clippy-v2/ui-prototype")
     }
 
-    private var dbPath: String {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("Clippy")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("clippy.db").path
+    private var appSupportDir: String {
+        let dir = NSHomeDirectory() + "/Library/Application Support/Clippy"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: nil)
+        return dir
     }
 
     // ── Launch ──
     func applicationDidFinishLaunching(_ notification: Notification) {
         startBackend()
+        loadAPIToken()
         setupStatusItem()
         setupPanel()
-        setupGlobalHotkey()
-        startClipboardMonitor()
+        registerCarbonHotkey()       // Panel toggle: works WITHOUT accessibility
+        checkAccessibilityForPaste() // Paste simulation: needs accessibility
+        // Image monitoring is handled by Go backend only (no Swift duplication)
+        syncSettingsFromBackend()     // Load paste_directly setting
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        stopClipboardMonitor()
         stopBackend()
+        unregisterCarbonHotkey()
         cleanupMonitors()
     }
 
-    // ── Clipboard Image Monitor ──
-    func startClipboardMonitor() {
-        clipboardMonitor = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.checkClipboardForImage()
+    // ── Carbon Global Hotkey (no accessibility needed) ──
+    func registerCarbonHotkey() {
+        // ⌘+Shift+V → toggle panel
+        let hotkeyID = EventHotKeyID(signature: OSType(0x434C5059), id: 1) // "CLPY"
+        var hotKeyRef: EventHotKeyRef?
+
+        // keyCode 0x09 = V, cmdKey | shiftKey
+        let modifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_V), modifiers, hotkeyID,
+                                         GetApplicationEventTarget(), 0, &hotKeyRef)
+
+        if status == noErr {
+            carbonHotkeyRef = hotKeyRef
+            hotkeyRegistered = true
+            hotkeyMethod = "carbon"
+            print("✅ Carbon hotkey registered (⌘⇧V) — no accessibility needed")
+        } else {
+            print("⚠️ Carbon hotkey failed (\(status)), falling back to NSEvent monitor")
+            setupNSEventHotkey()
         }
-        print("📋 Clipboard image monitor started (0.5s interval)")
-    }
 
-    func stopClipboardMonitor() {
-        clipboardMonitor?.invalidate()
-        clipboardMonitor = nil
-    }
-
-    private func checkClipboardForImage() {
-        let pasteboard = NSPasteboard.general
-
-        guard let types = pasteboard.types else { return }
-        guard types.contains(.png) || types.contains(.tiff) else { return }
-
-        guard let imageData = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff) else { return }
-
-        // Dedup by hash
-        let hash = imageData.hashValue
-        if hash == lastImageHash { return }
-        lastImageHash = hash
-
-        // Convert TIFF to PNG if needed
-        var pngData = imageData
-        if pasteboard.data(forType: .tiff) != nil && pasteboard.data(forType: .png) == nil {
-            if let bitmap = NSBitmapImageRep(data: imageData),
-               let converted = bitmap.representation(using: .png, properties: [:]) {
-                pngData = converted
+        // Install Carbon event handler
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { (_, event, _) -> OSStatus in
+            guard let event = event else { return OSStatus(eventNotHandledErr) }
+            var hotkeyID = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                              EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &hotkeyID)
+            if hotkeyID.id == 1 {
+                DispatchQueue.main.async {
+                    if let delegate = NSApp.delegate as? AppDelegate {
+                        delegate.togglePanel()
+                    }
+                }
             }
-        }
+            return noErr
+        }, 1, &eventType, nil, nil)
+    }
 
-        // Save to temp file
-        let tempDir = FileManager.default.temporaryDirectory
-        let tempFile = tempDir.appendingPathComponent("clippy_upload_\(UUID().uuidString).png")
-        do {
-            try pngData.write(to: tempFile)
-        } catch {
-            print("❌ Failed to save temp image: \(error)")
+    func unregisterCarbonHotkey() {
+        if let ref = carbonHotkeyRef {
+            UnregisterEventHotKey(ref)
+            carbonHotkeyRef = nil
+        }
+    }
+
+    // Fallback: NSEvent monitors (requires accessibility)
+    func setupNSEventHotkey() {
+        hotkeyGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleHotkey(event)
+        }
+        hotkeyLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleHotkey(event)
+            return event
+        }
+        hotkeyRegistered = true
+        hotkeyMethod = "nsevent"
+        print("✅ NSEvent hotkey registered (⌘⇧V) — requires accessibility")
+    }
+
+    // ── Accessibility (only for paste simulation) ──
+    func checkAccessibilityForPaste() {
+        if AXIsProcessTrusted() {
+            accessibilityGranted = true
+            print("✅ Accessibility granted — paste simulation enabled")
             return
         }
 
-        // Upload to Go backend
-        uploadImage(fileURL: tempFile)
+        // Don't block startup with alert. Just note the status.
+        // When user first tries to paste, show onboarding if needed.
+        print("ℹ️ Accessibility not yet granted — paste will copy to clipboard only")
 
-        // Clean up temp file after a delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            try? FileManager.default.removeItem(at: tempFile)
+        // Silently poll in background
+        Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] timer in
+            if AXIsProcessTrusted() {
+                timer.invalidate()
+                self?.accessibilityGranted = true
+                print("✅ Accessibility permission granted")
+            }
         }
-
-        print("📤 Image detected on clipboard, uploading...")
     }
 
-    private func uploadImage(fileURL: URL) {
-        let url = URL(string: "http://localhost:5100/api/clips/image")!
+    func requestAccessibilityIfNeeded() {
+        guard !accessibilityGranted else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "需要辅助功能权限"
+        alert.informativeText = "Clippy 需要辅助功能权限才能直接粘贴到当前应用。\n\n不授权也可以使用，但需要手动 ⌘V 粘贴。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "前往设置")
+        alert.addButton(withTitle: "暂不需要")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
+    }
+
+    // ── Sync Settings from Backend ──
+    func syncSettingsFromBackend() {
+        // Wait a moment for backend to start
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.fetchSettings()
+        }
+        // Re-sync periodically
+        Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.fetchSettings()
+        }
+    }
+
+    private func fetchSettings() {
+        guard let url = URL(string: "http://127.0.0.1:5100/api/settings") else { return }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-
-        let boundary = "Boundary-\(UUID().uuidString)"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-
-        var body = Data()
-
-        // Add file
-        let filename = fileURL.lastPathComponent
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"image\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: image/png\r\n\r\n".data(using: .utf8)!)
-
-        do {
-            let fileData = try Data(contentsOf: fileURL)
-            body.append(fileData)
-        } catch {
-            print("❌ Failed to read temp file: \(error)")
-            return
-        }
-
-        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        request.httpBody = body
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                print("❌ Upload failed: \(error)")
-                return
-            }
-            if let data = data, let resp = String(data: data, encoding: .utf8) {
-                print("✅ Image uploaded: \(resp)")
+        request.setValue(apiToken, forHTTPHeaderField: "X-Clippy-Token")
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+            guard let data = data, error == nil else { return }
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                DispatchQueue.main.async {
+                    if let pd = json["paste_directly"] as? Bool {
+                        self?.pasteDirectly = pd
+                    }
+                }
             }
         }.resume()
     }
 
-    // ── Backend ──
+    // ── Load API Token ──
+    private func loadAPIToken() {
+        let tokenPath = appSupportDir + "/api_token"
+        // Retry a few times since backend may still be starting
+        for attempt in 0..<10 {
+            if let token = try? String(contentsOfFile: tokenPath, encoding: .utf8) {
+                apiToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+                print("🔑 API token loaded (attempt \(attempt + 1))")
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        print("⚠️ Could not load API token — API calls will be unauthorized")
+    }
+
+    // ── Backend (Single Instance) ──
     func startBackend() {
+        // Check if backend is already running (single-instance)
+        if isBackendAlive() {
+            print("✅ Backend already running on port 5100, reusing")
+            return
+        }
+
         let process = Process()
         process.executableURL = backendURL
 
-        // Fixed data directory: ~/Library/Application Support/Clippy/
-        let appSupportDir = NSHomeDirectory() + "/Library/Application Support/Clippy"
         let imagesDir = appSupportDir + "/images"
-        try? FileManager.default.createDirectory(atPath: imagesDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(atPath: imagesDir, withIntermediateDirectories: true, attributes: nil)
 
         process.arguments = [
             "-port", "5100",
@@ -212,9 +345,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try process.run()
             backendProcess = process
+            print("🚀 Backend started (PID \(process.processIdentifier))")
         } catch {
             print("❌ Backend failed: \(error)")
         }
+    }
+
+    private func isBackendAlive() -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        var alive = false
+
+        guard let url = URL(string: "http://127.0.0.1:5100/api/health") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.0
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                alive = true
+            }
+            semaphore.signal()
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 1.5)
+        return alive
     }
 
     func stopBackend() {
@@ -259,10 +412,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel?.animationBehavior = .utilityWindow
         panel?.hidesOnDeactivate = false
 
+        // Liquid Glass: light frosted glass like macOS system menus
+        let visualEffect = NSVisualEffectView(frame: panel!.contentView!.bounds)
+        visualEffect.autoresizingMask = [.width, .height]
+        visualEffect.material = .popover
+        visualEffect.blendingMode = .behindWindow
+        visualEffect.state = .active
+        panel?.contentView?.addSubview(visualEffect)
+
         // Content
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        config.userContentController.add(ClippyBridge(), name: "ClippyBridge")
+
+        bridge = ClippyBridge()
+        bridge.appDelegate = self
+        config.userContentController.add(bridge, name: "ClippyBridge")
+
+        // Inject before the first document load so initial fetch() calls include auth.
+        let tokenScript = WKUserScript(
+            source: "window.__CLIPPY_TOKEN__ = '\(apiToken)';",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        config.userContentController.addUserScript(tokenScript)
 
         let webView = WKWebView(frame: panel!.contentView!.bounds, configuration: config)
         webView.autoresizingMask = [.width, .height]
@@ -276,28 +448,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         webView.loadFileURL(htmlFile, allowingReadAccessTo: uiDir)
     }
 
-    // ── Global Hotkey (NSEvent) ──
-    func setupGlobalHotkey() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        guard AXIsProcessTrustedWithOptions(options) else {
-            print("⚠️ Accessibility not enabled - hotkey will not work")
-            return
-        }
-
-        // Global monitor: catches Cmd+Shift+V in OTHER apps
-        hotkeyGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleHotkey(event)
-        }
-
-        // Local monitor: catches Cmd+Shift+V in OUR app
-        hotkeyLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleHotkey(event)
-            return event
-        }
-
-        print("✅ Global hotkey registered (Cmd+Shift+V)")
-    }
-
+    // ── Global Hotkey handler (for NSEvent fallback) ──
     private func handleHotkey(_ event: NSEvent) {
         let shiftPressed = event.modifierFlags.contains(.shift)
         let cmdPressed = event.modifierFlags.contains(.command)
@@ -355,11 +506,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self, let panel = self.panel, panel.isVisible else {
                 return event
             }
-            // If click is on the panel itself, don't close
             if event.window == panel {
                 return event
             }
-            // Click is on another window in our app (e.g., menu bar) - close panel
             self.hidePanel()
             return event
         }

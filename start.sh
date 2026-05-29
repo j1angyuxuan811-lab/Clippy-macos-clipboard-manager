@@ -3,24 +3,25 @@ set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_BUNDLE="$PROJECT_DIR/build/Clippy.app"
-BACKEND_BIN="$APP_BUNDLE/Contents/MacOS/clippy-backend"
+BACKEND_BIN="$APP_BUNDLE/Contents/Resources/go-backend/clippy-server"
 DB_DIR="$HOME/Library/Application Support/Clippy"
-DB_PATH="$DB_DIR/clippy.db"
+IMAGES_DIR="$DB_DIR/images"
 STATIC_DIR="$APP_BUNDLE/Contents/Resources/ui-prototype"
 LOG_FILE="$DB_DIR/backend.log"
 
 # Kill existing processes
 echo "🛑 Stopping existing Clippy processes..."
-pkill -f "clippy-backend" 2>/dev/null || true
+pkill -f "clippy-server" 2>/dev/null || true
 pkill -f "Contents/MacOS/Clippy" 2>/dev/null || true
 sleep 1
 
-# Create database directory
+# Create directories
 mkdir -p "$DB_DIR"
+mkdir -p "$IMAGES_DIR"
 
 # Start backend
 echo "🚀 Starting Go backend..."
-"$BACKEND_BIN" -addr :5100 -db "$DB_PATH" -static "$STATIC_DIR" > "$LOG_FILE" 2>&1 &
+"$BACKEND_BIN" -port 5100 -data "$DB_DIR" -images "$IMAGES_DIR" -static "$STATIC_DIR" > "$LOG_FILE" 2>&1 &
 BACKEND_PID=$!
 echo "   Backend PID: $BACKEND_PID"
 

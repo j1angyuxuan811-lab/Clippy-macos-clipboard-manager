@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"clippy-backend/internal/config"
 	"clippy-backend/internal/db"
 )
 
@@ -40,10 +41,32 @@ func (m *Monitor) Start() {
 }
 
 func (m *Monitor) check() {
+	// Skip if recording is paused
+	if config.IsPaused() {
+		return
+	}
+
+	// Skip if front app is in ignored list
+	if bundleID := getFrontAppBundleID(); bundleID != "" {
+		if config.IsAppIgnored(bundleID) {
+			return
+		}
+	}
+
 	if m.checkImage() {
 		return
 	}
 	m.checkText()
+}
+
+// getFrontAppBundleID returns the bundle ID of the frontmost app using osascript
+func getFrontAppBundleID() string {
+	out, err := exec.Command("osascript", "-e",
+		`tell application "System Events" to get bundle identifier of first application process whose frontmost is true`).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (m *Monitor) checkText() {
@@ -126,8 +149,14 @@ close access f`, tmpFile)
 	m.lastTextHash = "" // reset text hash when image changes
 
 	relPath := filepath.Join("data", "images", filepath.Base(tmpFile))
-	m.store.Create("[图片]", "image", relPath)
-	log.Printf("🖼️ Image captured: %s (%.1f KB)", filepath.Base(tmpFile), float64(finfo.Size())/1024)
+	item, _ := m.store.CreateWithHash("[图片]", "image", relPath, hash)
+	// If DB dedup found existing item with different path, delete the new file
+	if item != nil && item.ImagePath != relPath {
+		_ = os.Remove(tmpFile)
+		log.Printf("🔁 Image dedup: reused existing %s", item.ImagePath)
+	} else {
+		log.Printf("🖼️ Image captured: %s (%.1f KB)", filepath.Base(tmpFile), float64(finfo.Size())/1024)
+	}
 	return true
 }
 

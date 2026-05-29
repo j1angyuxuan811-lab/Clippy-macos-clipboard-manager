@@ -4,15 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Clippy</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
   :root {
-    --bg: rgba(246, 246, 246, 0.72);
-    --bg-solid: #f6f6f6;
-    --card: rgba(255, 255, 255, 0.85);
-    --card-hover: rgba(255, 255, 255, 0.95);
-    --border: rgba(0, 0, 0, 0.08);
+    --bg: rgba(255, 255, 255, 0.82);
+    --bg-solid: rgba(255, 255, 255, 0.82);
+    --card: rgba(255, 255, 255, 0.6);
+    --card-hover: rgba(255, 255, 255, 0.8);
+    --border: rgba(0, 0, 0, 0.06);
     --text: #1d1d1f;
     --text2: #86868b;
     --accent: #007aff;
@@ -24,7 +25,7 @@
 
   body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-    background: var(--bg-solid);
+    background: var(--bg);
     color: var(--text);
     height: 100vh;
     overflow: hidden;
@@ -256,7 +257,30 @@
   }
 
   .empty span { font-size: 13px; }
+
+  /* ── Code Highlight ── */
+  .clip-code {
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    background: rgba(0, 0, 0, 0.03);
+    border-radius: 8px;
+    padding: 8px 10px;
+    overflow: hidden;
+    max-height: 80px;
+    white-space: pre;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+  }
+  .clip-code code {
+    background: none !important;
+    padding: 0 !important;
+    font-size: inherit;
+    line-height: inherit;
+  }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
 <body>
 <div class="app">
@@ -268,15 +292,29 @@
   </div>
   <div class="list" id="list"></div>
   <div class="footer">
-    <span><kbd>↑↓</kbd> 选择 · <kbd>↵</kbd> 粘贴 · <kbd>⌫</kbd> 删除</span>
-    <span><span class="status-dot"></span>已连接</span>
+    <span><kbd>↵</kbd> 粘贴 · <kbd>⇧↵</kbd> 纯文本 · <kbd>⌘1-9</kbd> 快选</span>
+    <span style="display:flex;align-items:center;gap:8px;">
+      <span><span class="status-dot"></span>已连接</span>
+      <button onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;color:var(--text2);font-size:14px;padding:2px;" title="设置 (⌘,)">⚙</button>
+    </span>
   </div>
 </div>
 
 <script>
-const API = 'http://localhost:5100';
+const API = 'http://127.0.0.1:5100';
 let clips = [];
 let selectedIdx = -1;
+
+// Auth token injected by Swift (window.__CLIPPY_TOKEN__)
+function authHeaders(extra = {}) {
+  const h = { ...extra };
+  if (window.__CLIPPY_TOKEN__) h['X-Clippy-Token'] = window.__CLIPPY_TOKEN__;
+  return h;
+}
+function authFetch(url, opts = {}) {
+  opts.headers = authHeaders(opts.headers || {});
+  return fetch(url, opts);
+}
 
 const list = document.getElementById('list');
 const searchInput = document.getElementById('search');
@@ -325,11 +363,13 @@ function render() {
 
   list.innerHTML = filtered.map((c, i) => {
     const type = c.content_type || detectType(c.content);
+    const shortcutBadge = i < 9 ? `<span style="position:absolute;top:6px;left:6px;font-size:9px;color:var(--text2);opacity:0.6;">⌘${i+1}</span>` : '';
     return `
-      <div class="clip-item" data-idx="${i}" data-id="${c.id}" ondblclick="pasteClip(${c.id})">
+      <div class="clip-item" data-idx="${i}" data-id="${c.id}" onclick="pasteClip(${c.id})">
+        ${shortcutBadge}
         <div class="clip-icon ${type}">${icons[type] || icons.text}</div>
         <div class="clip-body">
-          ${c.content_type === 'image' && c.image_path ? `<img class="clip-image" src="${API}/images/${c.image_path.split('/').pop()}" alt="截图" />` : `<div class="clip-text">${escapeHtml(c.content)}</div>`}
+          ${c.content_type === 'image' && c.image_path ? `<img class="clip-image" src="${API}/images/${c.image_path.split('/').pop()}" alt="截图" />` : type === 'code' ? `<pre class="clip-code"><code>${escapeHtml(c.content)}</code></pre>` : `<div class="clip-text">${escapeHtml(c.content)}</div>`}
           <div class="clip-meta">
             <span>${timeAgo(c.created_at)}</span>
             <span>·</span>
@@ -344,12 +384,23 @@ function render() {
         ${c.pinned ? `<svg class="pin-badge" viewBox="0 0 24 24" fill="#007aff"><path d="M16 2l-4 4-6-2-4 4 6 6-5 7h2l4.5-5 6 6-1-6 6-4-2-6-4 4z"/></svg>` : ''}
       </div>`;
   }).join('');
+
+  // Syntax highlighting is optional; the app must keep working offline.
+  if (window.hljs) {
+    list.querySelectorAll('.clip-code code').forEach(el => {
+      hljs.highlightElement(el);
+    });
+  }
 }
 
 // ── API ──
 async function fetchClips() {
   try {
-    const res = await fetch(`${API}/api/clips`);
+    const res = await authFetch(`${API}/api/clips`);
+    if (!res.ok) {
+      list.innerHTML = `<div class="empty">${icons.clipboard}<span>${res.status === 401 ? '鉴权失败（重启应用）' : '后端错误 ' + res.status}</span></div>`;
+      return;
+    }
     const data = await res.json();
     clips = (data.clips || []).sort((a, b) => {
       if (a.pinned !== b.pinned) return b.pinned - a.pinned;
@@ -363,20 +414,23 @@ async function fetchClips() {
 
 async function pasteClip(id) {
   try {
-    const res = await fetch(`${API}/api/clips/${id}/copy`, { method: 'POST' });
+    const res = await authFetch(`${API}/api/clips/${id}/copy`, { method: 'POST' });
     const clip = await res.json();
     if (clip.content_type === 'image' && clip.image_abs_path) {
-      // Image: tell Swift to copy image to system clipboard via bridge
+      // Image: tell Swift to copy image and paste
       window.webkit?.messageHandlers?.ClippyBridge?.postMessage({
         action: 'copyImage',
         path: clip.image_abs_path
       });
     } else {
-      // Text: write to clipboard
-      await navigator.clipboard.writeText(clip.content);
+      // Text: tell Swift to paste into active app
+      window.webkit?.messageHandlers?.ClippyBridge?.postMessage({
+        action: 'pasteText',
+        text: clip.content
+      });
     }
-    window.close?.();
   } catch (e) {
+    // Fallback: just copy to clipboard
     const clip = clips.find(c => c.id == id);
     if (clip && clip.content_type !== 'image') {
       await navigator.clipboard.writeText(clip.content);
@@ -386,7 +440,7 @@ async function pasteClip(id) {
 
 async function copyClip(id) {
   try {
-    const res = await fetch(`${API}/api/clips/${id}/copy`, { method: 'POST' });
+    const res = await authFetch(`${API}/api/clips/${id}/copy`, { method: 'POST' });
     const clip = await res.json();
     if (clip.content_type === 'image' && clip.image_abs_path) {
       window.webkit?.messageHandlers?.ClippyBridge?.postMessage({
@@ -405,19 +459,61 @@ async function copyClip(id) {
 }
 
 async function togglePin(id, pinned) {
-  await fetch(`${API}/api/clips/${id}/pin`, { method: 'PUT' });
+  await authFetch(`${API}/api/clips/${id}/pin`, { method: 'PUT' });
   fetchClips();
 }
 
 async function deleteClip(id) {
-  await fetch(`${API}/api/clips/${id}`, { method: 'DELETE' });
+  await authFetch(`${API}/api/clips/${id}`, { method: 'DELETE' });
   fetchClips();
 }
 
 // ── Keyboard ──
 searchInput.addEventListener('input', render);
 
+// Plain text paste helper
+async function pastePlainText(id) {
+  const clip = clips.find(c => c.id == parseInt(id));
+  if (!clip || clip.content_type === 'image') return;
+  // Strip any formatting - just send raw text
+  window.webkit?.messageHandlers?.ClippyBridge?.postMessage({
+    action: 'pasteText',
+    text: clip.content
+  });
+}
+
 document.addEventListener('keydown', (e) => {
+  // Esc always closes (settings or panel)
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    if (settingsVisible) {
+      toggleSettings();
+    } else {
+      window.webkit?.messageHandlers?.ClippyBridge?.postMessage({ action: 'hidePanel' });
+    }
+    return;
+  }
+
+  if (settingsVisible) return; // Don't navigate when settings open
+
+  // ⌘1-⌘9: quick paste items 1-9
+  if (e.metaKey && e.key >= '1' && e.key <= '9') {
+    e.preventDefault();
+    const idx = parseInt(e.key) - 1;
+    const items = document.querySelectorAll('.clip-item');
+    if (idx < items.length) {
+      pasteClip(items[idx].dataset.id);
+    }
+    return;
+  }
+
+  // ⌘, opens settings
+  if (e.key === ',' && e.metaKey) {
+    e.preventDefault();
+    toggleSettings();
+    return;
+  }
+
   const items = document.querySelectorAll('.clip-item');
   if (!items.length) return;
 
@@ -429,9 +525,14 @@ document.addEventListener('keydown', (e) => {
     selectedIdx = Math.max(selectedIdx - 1, 0);
   } else if (e.key === 'Enter' && selectedIdx >= 0) {
     e.preventDefault();
-    pasteClip(items[selectedIdx].dataset.id);
+    if (e.shiftKey) {
+      // Shift+Enter: paste as plain text
+      pastePlainText(items[selectedIdx].dataset.id);
+    } else {
+      pasteClip(items[selectedIdx].dataset.id);
+    }
     return;
-  } else if (e.key === 'Backspace' && selectedIdx >= 0) {
+  } else if (e.key === 'Backspace' && selectedIdx >= 0 && !e.metaKey) {
     e.preventDefault();
     deleteClip(items[selectedIdx].dataset.id);
     return;
@@ -446,8 +547,169 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ── Settings ──
+let settingsVisible = false;
+let settings = {};
+let clippyStatus = {}; // hotkey/accessibility status from Swift bridge
+
+// Listen for status updates from Swift
+window._onClippyStatus = (status) => { clippyStatus = status; };
+
+async function loadSettings() {
+  try {
+    const res = await authFetch(`${API}/api/settings`);
+    settings = await res.json();
+  } catch(e) {
+    settings = { retention_hours: 168, ignored_apps: [], max_items: 1000, paste_directly: true, paused_until: '' };
+  }
+  // Request status from Swift bridge
+  window.webkit?.messageHandlers?.ClippyBridge?.postMessage({ action: 'getStatus' });
+}
+
+async function saveSettings() {
+  try {
+    const res = await authFetch(`${API}/api/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings)
+    });
+    settings = await res.json();
+    // Immediately notify Swift of settings change (no 30s delay)
+    window.webkit?.messageHandlers?.ClippyBridge?.postMessage({
+      action: 'settingsChanged',
+      paste_directly: settings.paste_directly
+    });
+  } catch(e) {}
+}
+
+function toggleSettings() {
+  settingsVisible = !settingsVisible;
+  if (settingsVisible) {
+    loadSettings().then(() => setTimeout(renderSettings, 100)); // small delay for status
+    list.style.display = 'none';
+  } else {
+    list.style.display = '';
+    list.innerHTML = '';
+    fetchClips();
+  }
+}
+
+function renderSettings() {
+  const retentionOptions = [
+    { value: 1, label: '1 小时' },
+    { value: 3, label: '3 小时' },
+    { value: 24, label: '1 天' },
+    { value: 168, label: '7 天' },
+    { value: 720, label: '30 天' },
+    { value: 0, label: '永久保留' },
+  ];
+
+  // Determine pause state
+  const isPaused = settings.paused_until && new Date(settings.paused_until) > new Date();
+  const pauseLabel = isPaused ? `⏸ 暂停中（至 ${new Date(settings.paused_until).toLocaleTimeString('zh-CN', {hour12:false, hour:'2-digit', minute:'2-digit'})}）` : '';
+
+  // Hotkey status
+  const hotkeyOk = clippyStatus.hotkey_registered;
+  const hotkeyIcon = hotkeyOk ? '✅' : '❌';
+  const hotkeyDesc = hotkeyOk
+    ? `${clippyStatus.hotkey_combo} 已注册 (${clippyStatus.hotkey_method === 'carbon' ? 'Carbon — 无需辅助功能' : 'NSEvent — 需辅助功能'})`
+    : '未注册 — 请重启应用或检查冲突';
+  const accessIcon = clippyStatus.accessibility_granted ? '✅' : '⚠️';
+  const accessDesc = clippyStatus.accessibility_granted ? '辅助功能已授权（支持直接粘贴）' : '辅助功能未授权（仅复制到剪贴板）';
+
+  list.style.display = '';
+  list.innerHTML = `
+    <div style="padding: 12px 4px;">
+      <h3 style="font-size:14px;font-weight:600;margin-bottom:16px;">⚙️ 设置</h3>
+
+      <!-- Hotkey Diagnostic -->
+      <div style="margin-bottom:16px;padding:10px;background:rgba(0,0,0,0.02);border-radius:10px;border:1px solid var(--border);">
+        <p style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">快捷键状态</p>
+        <div style="font-size:12px;line-height:1.8;">
+          <div>${hotkeyIcon} ${hotkeyDesc}</div>
+          <div>${accessIcon} ${accessDesc}</div>
+        </div>
+      </div>
+
+      <!-- Privacy: Pause Recording -->
+      <div style="margin-bottom:16px;padding:10px;background:rgba(0,0,0,0.02);border-radius:10px;border:1px solid var(--border);">
+        <p style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">🔒 隐私</p>
+        ${isPaused ? `<div style="font-size:12px;color:#ff9500;margin-bottom:8px;">${pauseLabel}</div>` : ''}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+          ${isPaused
+            ? `<button onclick="resumeRecording()" style="padding:4px 10px;border:1px solid #34c759;background:#f0fff4;border-radius:6px;font-size:11px;cursor:pointer;color:#34c759;">▶ 恢复记录</button>`
+            : [5,15,30,60].map(m => `<button onclick="pauseRecording(${m})" style="padding:4px 10px;border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;background:white;">⏸ ${m}分钟</button>`).join('')
+          }
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${[5,15,30].map(m => `<button onclick="clearRecent(${m})" style="padding:4px 10px;border:1px solid #ff3b30;border-radius:6px;font-size:11px;cursor:pointer;background:#fff5f5;color:#ff3b30;">🗑 清空最近${m}分钟</button>`).join('')}
+        </div>
+      </div>
+
+      <div style="margin-bottom:16px;">
+        <label style="font-size:12px;color:var(--text2);display:block;margin-bottom:6px;">保留时长</label>
+        <select id="set-retention" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;background:var(--card);font-family:inherit;">
+          ${retentionOptions.map(o => `<option value="${o.value}" ${settings.retention_hours === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select>
+      </div>
+
+      <div style="margin-bottom:16px;">
+        <label style="font-size:12px;color:var(--text2);display:block;margin-bottom:6px;">最大条目数</label>
+        <input id="set-max" type="number" value="${settings.max_items || 1000}" min="100" max="10000" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;background:var(--card);font-family:inherit;">
+      </div>
+
+      <div style="margin-bottom:16px;">
+        <label style="font-size:12px;color:var(--text2);display:block;margin-bottom:6px;">忽略的应用 (Bundle ID，每行一个)</label>
+        <textarea id="set-ignored" rows="4" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:8px;font-size:12px;background:var(--card);font-family:'SF Mono',monospace;resize:vertical;" placeholder="com.1password.1password&#10;com.apple.keychainaccess">${(settings.ignored_apps || []).join('\n')}</textarea>
+        <p style="font-size:10px;color:var(--text2);margin-top:4px;">默认忽略：1Password、Keychain、LastPass、Bitwarden、Dashlane、KeePassXC</p>
+      </div>
+
+      <div style="margin-bottom:16px;display:flex;align-items:center;gap:8px;">
+        <input id="set-paste" type="checkbox" ${settings.paste_directly ? 'checked' : ''} style="width:16px;height:16px;">
+        <label for="set-paste" style="font-size:13px;">点击条目直接粘贴到当前应用</label>
+      </div>
+
+      <div style="display:flex;gap:8px;">
+        <button onclick="applySettings()" style="flex:1;padding:8px;background:var(--accent);color:white;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit;">保存</button>
+        <button onclick="toggleSettings()" style="flex:1;padding:8px;background:rgba(0,0,0,0.05);color:var(--text);border:none;border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit;">取消</button>
+      </div>
+    </div>
+  `;
+}
+
+async function pauseRecording(minutes) {
+  await authFetch(`${API}/api/pause`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ minutes })
+  });
+  loadSettings().then(renderSettings);
+}
+
+async function resumeRecording() {
+  await authFetch(`${API}/api/resume`, { method: 'POST' });
+  loadSettings().then(renderSettings);
+}
+
+async function clearRecent(minutes) {
+  if (!confirm(`确定清空最近 ${minutes} 分钟的记录？此操作不可恢复。`)) return;
+  const res = await authFetch(`${API}/api/clips/recent?minutes=${minutes}`, { method: 'DELETE' });
+  const data = await res.json();
+  alert(`已清除 ${data.deleted} 条记录`);
+  loadSettings().then(renderSettings);
+}
+
+function applySettings() {
+  settings.retention_hours = parseInt(document.getElementById('set-retention').value);
+  settings.max_items = parseInt(document.getElementById('set-max').value) || 1000;
+  settings.ignored_apps = document.getElementById('set-ignored').value.split('\n').map(s => s.trim()).filter(Boolean);
+  settings.paste_directly = document.getElementById('set-paste').checked;
+  saveSettings().then(() => toggleSettings());
+}
+
 // ── Init ──
 fetchClips();
+loadSettings();
 setInterval(fetchClips, 2000);
 </script>
 </body>
