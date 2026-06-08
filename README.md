@@ -10,8 +10,10 @@ Current version: `1.2.1`
 - **Caret-aware panel placement**: in typing contexts, the panel is positioned near the input caret and avoids covering the active input area when Accessibility data is available.
 - **Keyboard-first workflow**: `Up` / `Down` selects items, `Enter` pastes, `Esc` closes.
 - **Direct paste flow**: Clippy captures the source app before opening the panel, then restores it and triggers paste after selection.
+- **Stable keyboard fallback**: AppKit local key handling backs up WKWebView keyboard events for Arrow / Enter / Esc navigation.
 - **Local clipboard history**: Go backend polls the macOS clipboard, stores items in SQLite, and deduplicates repeated content.
 - **Text, code, URL, and image support**: image captures are stored locally and deduplicated by hash.
+- **UTF-8 text handling**: clipboard text is read through UTF-8 plain-text candidates first, with replacement-character noise filtered before storage.
 - **Privacy controls**: local-only API on `127.0.0.1`, random session token for sensitive API calls, default ignored sensitive apps, pause/resume, and recent-history cleanup.
 - **Configurable retention**: default retention is 7 days, with pinned items preserved.
 - **Liquid glass UI**: AppKit `NSVisualEffectView` shell with a lightweight WKWebView interface.
@@ -21,7 +23,7 @@ Current version: `1.2.1`
 Build and install locally:
 
 ```bash
-git clone https://github.com/Iris-Jiang/clippy-v2.git
+git clone https://github.com/j1angyuxuan811-lab/clippy-v2.git
 cd clippy-v2
 ./start.sh
 ```
