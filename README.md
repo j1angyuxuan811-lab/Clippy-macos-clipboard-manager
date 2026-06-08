@@ -1,6 +1,6 @@
-# Clippy v2
+# Clippy - macOS Clipboard Manager
 
-Clippy is a local-first macOS clipboard manager built as a menu bar app. It focuses on a Windows-style clipboard workflow: press `Command + Shift + V` in any text field, choose an item with the keyboard, and paste it back into the original app.
+Clippy is a local-first macOS clipboard manager for keyboard-first paste workflows. It runs as a menu bar app and focuses on a Windows-style clipboard interaction: press `Command + Shift + V` in any text field, choose an item with the keyboard, and paste it back into the original app.
 
 Current version: `1.2.1`
 
@@ -23,8 +23,8 @@ Current version: `1.2.1`
 Build and install locally:
 
 ```bash
-git clone https://github.com/j1angyuxuan811-lab/clippy-v2.git
-cd clippy-v2
+git clone https://github.com/j1angyuxuan811-lab/clippy-macos-clipboard-manager.git
+cd clippy-macos-clipboard-manager
 ./start.sh
 ```
 
