@@ -4,6 +4,7 @@
 *.so
 *.dylib
 build/
+.clippy-build/
 bin/
 *.app/
 *.db
@@ -13,6 +14,7 @@ bin/
 go-backend/clippy-backend
 go-backend/clippy-server
 go-backend/data/
+go-backend/.gocache/
 
 # Swift
 swift-frontend/.build/

@@ -1,172 +1,155 @@
 # Clippy v2
 
-macOS 智能剪切板管理器。Go 后端 + Swift 菜单栏 + 液态玻璃 UI。
+Clippy is a local-first macOS clipboard manager built as a menu bar app. It focuses on a Windows-style clipboard workflow: press `Command + Shift + V` in any text field, choose an item with the keyboard, and paste it back into the original app.
 
-![Clippy Demo](screenshots/demo.gif)
+Current version: `1.2.1`
 
-![Clippy UI](screenshots/main-ui.png)
+## Features
 
----
+- **Global shortcut**: `Command + Shift + V` opens the clipboard panel from any app.
+- **Caret-aware panel placement**: in typing contexts, the panel is positioned near the input caret and avoids covering the active input area when Accessibility data is available.
+- **Keyboard-first workflow**: `Up` / `Down` selects items, `Enter` pastes, `Esc` closes.
+- **Direct paste flow**: Clippy captures the source app before opening the panel, then restores it and triggers paste after selection.
+- **Local clipboard history**: Go backend polls the macOS clipboard, stores items in SQLite, and deduplicates repeated content.
+- **Text, code, URL, and image support**: image captures are stored locally and deduplicated by hash.
+- **Privacy controls**: local-only API on `127.0.0.1`, random session token for sensitive API calls, default ignored sensitive apps, pause/resume, and recent-history cleanup.
+- **Configurable retention**: default retention is 7 days, with pinned items preserved.
+- **Liquid glass UI**: AppKit `NSVisualEffectView` shell with a lightweight WKWebView interface.
 
-## ✨ 特性
+## Install
 
-- **自动捕获** — 800ms 轮询系统剪切板，自动去重（文本精确匹配，图片哈希去重），支持文本/代码/URL/图片识别
-- **液态玻璃 UI** — macOS Tahoe 设计语言，NSVisualEffectView + 半透明排版
-- **快速操作** — 搜索、固定、删除、单击粘贴，全部键盘可操作
-- **智能清理** — 未置顶条目 3 小时后自动删除，置顶条目永久保留
-- **全局快捷键** — `⌘ + Shift + V` 随时呼出
-- **轻量高效** — 内存 < 50MB，CPU < 1%（静止时）
-
-## 📦 安装
-
-### Homebrew（推荐）
+Build and install locally:
 
 ```bash
-brew tap j1angyuxuan811-lab/clippy
-brew install clippy
-open /Applications/Clippy.app
+git clone https://github.com/Iris-Jiang/clippy-v2.git
+cd clippy-v2
+./start.sh
 ```
 
-### 手动安装
+`./start.sh` builds the Go backend, builds the Swift app, assembles `Clippy.app`, installs it to `/Applications`, stops older Clippy processes, launches the app, and checks the backend version.
 
-1. 从 [Releases](https://github.com/j1angyuxuan811-lab/clippy-v2/releases) 下载 `Clippy-1.0.0.zip`
-2. 解压后将 `Clippy.app` 拖入 `/Applications`
-3. 双击打开
+If you only want to build the app bundle:
 
-### ⚠️ 首次运行
-
-需要授予辅助功能权限：
-
-**系统设置 → 隐私与安全性 → 辅助功能 → 启用 Clippy**
-
-## 🎮 使用
-
-| 操作 | 快捷键 / 方式 |
-|------|--------------|
-| 呼出/关闭面板 | `⌘ + Shift + V` 或点击菜单栏 📋 |
-| 搜索 | 面板顶部输入框 |
-| 选择条目 | `↑` `↓` 方向键 |
-| 粘贴选中项 | `Enter` |
-| 固定/取消固定 | 悬停显示 📌 按钮 |
-| 删除 | 悬停显示 ✕ 按钮 |
-| 关闭面板 | `Esc` 或点击外部区域 |
-| 导出 | 点击顶部导出按钮 → JSON/CSV |
-| 隐私模式 | 点击眼睛图标暂停记录 |
-
-## 🏗 架构
-
-```
-┌─────────────────────────────────────────────────┐
-│                Clippy.app                       │
-│  ┌──────────────────────────────────────────┐   │
-│  │  Swift (Menu Bar + Panel + Hotkey)       │   │
-│  │  ┌────────────────────────────────────┐  │   │
-│  │  │  WKWebView (Liquid Glass UI)      │  │   │
-│  │  └──────────────┬─────────────────────┘  │   │
-│  └─────────────────┼────────────────────────┘   │
-│                    │ HTTP API (:5100)            │
-│  ┌─────────────────┼────────────────────────┐   │
-│  │  Go Backend (Clipboard + SQLite + API)   │   │
-│  └──────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────┘
+```bash
+./build.sh
 ```
 
-### 技术栈
+The built app is written to `.clippy-build/Clippy.app`.
 
-| 层 | 技术 | 职责 |
-|----|------|------|
-| 前端 | WKWebView + HTML/CSS/JS | 液态玻璃 UI，SVG 图标，键盘导航 |
-| 壳层 | Swift (AppKit) | 菜单栏、全局热键、进程管理、剪切板写入 |
-| 后端 | Go | 剪切板监听、SQLite 存储、REST API |
-| 存储 | SQLite | 自动清理（3小时未置顶自动删除，置顶永久保留） |
+## First Run
 
-### 为什么 Go + Swift？
+For direct paste and caret-aware placement, grant Accessibility permission:
 
-- **Go**：高并发轮询（800ms），SQLite 操作快，单二进制部署
-- **Swift**：原生菜单栏集成，Carbon API 全局热键，进程生命周期管理
-- **通信**：HTTP API 解耦，方便后续扩展（CLI 工具、其他客户端）
+System Settings -> Privacy & Security -> Accessibility -> enable Clippy
 
-## 🔌 API
+Without Accessibility permission, Clippy can still keep clipboard history and copy selected text, but direct paste and caret-based targeting may fall back to less precise behavior.
 
-所有端点运行在 `http://localhost:5100`
+## Usage
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/clips` | 获取所有剪切板条目 |
-| GET | `/api/clips/search?q=` | 搜索 |
-| GET | `/api/clips/:id` | 获取单条 |
-| PUT | `/api/clips/:id/pin` | 切换固定状态 |
-| DELETE | `/api/clips/:id` | 删除条目 |
-| DELETE | `/api/clips` | 清空所有 |
-| GET | `/api/clips/export?format=json` | 导出 JSON |
-| GET | `/api/clips/export?format=csv` | 导出 CSV |
-| GET | `/api/health` | 健康检查 |
+| Action | Shortcut / Control |
+|---|---|
+| Open clipboard panel | `Command + Shift + V` |
+| Open from menu bar | Click the Clippy menu bar icon |
+| Move selection | `Up` / `Down` |
+| Paste selected item | `Enter` |
+| Close panel | `Esc` |
+| Quick paste visible items | `Command + 1` through `Command + 9` |
+| Paste as plain text | `Shift + Enter` |
+| Search | Type in the search field |
+| Pin / delete | Hover an item and use the item actions |
+| Quit | Menu bar context menu -> `退出 Clippy` |
 
-## 🛠 开发
+## Architecture
 
-### 前置条件
+```text
+Clippy.app
+├── Swift / AppKit
+│   ├── menu bar app
+│   ├── NSPanel positioning
+│   ├── global hotkey via HotKey
+│   ├── Accessibility target capture
+│   └── paste simulation
+├── WKWebView UI
+│   ├── clipboard list
+│   ├── search and settings
+│   └── keyboard bridge
+└── Go backend
+    ├── clipboard polling
+    ├── SQLite persistence
+    ├── local REST API
+    └── image storage / cleanup
+```
 
-- macOS 13+ (Ventura)
+### Tech Stack
+
+| Layer | Tech | Responsibility |
+|---|---|---|
+| Shell | Swift + AppKit | Menu bar app, panel lifecycle, hotkey, paste target restore |
+| UI | WKWebView + HTML/CSS/JS | Clipboard list, search, settings, keyboard navigation |
+| Backend | Go | Clipboard monitor, SQLite store, REST API |
+| Storage | SQLite + local image files | History, pins, image paths, cleanup |
+
+## Local API
+
+The backend listens only on `127.0.0.1:5100`. Sensitive endpoints require the session token injected into the WebView as `X-Clippy-Token`.
+
+Common endpoints:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/health` | Health and version |
+| GET | `/api/clips` | List clipboard items |
+| POST | `/api/clips` | Add a text item |
+| POST | `/api/clips/{id}/copy` | Mark / return an item for paste |
+| PUT | `/api/clips/{id}/pin` | Toggle pin |
+| DELETE | `/api/clips/{id}` | Delete item |
+| DELETE | `/api/clips/recent?minutes=...` | Delete recent items |
+| GET / PUT | `/api/settings` | Read or update settings |
+| POST | `/api/pause` | Pause recording |
+| POST | `/api/resume` | Resume recording |
+
+## Development
+
+Requirements:
+
+- macOS 13+
 - Go 1.21+
 - Xcode Command Line Tools
+- Swift Package Manager
 
-### 构建
+Useful commands:
 
 ```bash
-# 克隆
-git clone https://github.com/j1angyuxuan811-lab/clippy-v2.git
-cd clippy-v2
+# Go tests
+cd go-backend
+go test ./...
 
-# 编译 Go 后端
-cd go-backend && go build -o ../bin/clippy-backend . && cd ..
+# Swift release build
+cd swift-frontend
+swift build -c release
 
-# 编译 Swift 前端
-cd swift-frontend && swift build -c release && cd ..
+# Contract tests
+cd ..
+for test in swift-frontend/Tests/*.sh; do sh "$test"; done
 
-# 打包 .app
-bash build.sh
-
-# 运行
-open build/Clippy.app
+# Build, install, and launch
+./start.sh
 ```
 
-### 项目结构
+## Verification Status
 
-```
-clippy-v2/
-├── go-backend/              # Go 后端
-│   ├── main.go              # 入口 + 优雅关闭
-│   ├── internal/
-│   │   ├── clipboard/       # 剪切板轮询
-│   │   ├── db/              # SQLite CRUD
-│   │   └── api/             # HTTP 路由
-├── swift-frontend/          # Swift 前端
-│   ├── Package.swift
-│   └── Sources/
-│       └── ClippyApp.swift  # 菜单栏 + WebView + 进程管理
-├── ui-prototype/            # Web UI
-│   └── index.html           # 液态玻璃风格
-├── homebrew-tap/            # Homebrew 公式
-│   └── Formula/clippy.rb
-├── screenshots/             # 截图
-└── build.sh                 # 构建脚本
-```
+The current local build has been verified with:
 
-## 📋 路线图
+- `go test ./...`
+- `swift build -c release`
+- `swift-frontend/Tests/*.sh`
+- `/api/health` returning `version: 1.2.1`
+- single running Clippy app process and single backend process
 
-- [x] 核心 MVP — 自动捕获、历史列表、搜索、固定、删除
-- [x] 液态玻璃 UI — macOS Tahoe 风格
-- [x] 全局快捷键 — NSEvent 监听
-- [x] 图片捕获和缩略图
-- [x] 图片哈希去重
-- [x] 3小时自动清理（置顶不删）
-- [x] Homebrew 安装
-- [ ] 代码语法高亮
-- [ ] 英语学习模式（本地词典、生词本导出 Anki）
-- [ ] 跨设备同步（局域网 Socket）
-- [ ] Obsidian 集成
-- [ ] AI 增强（自然语言查询历史）
+## Notes
 
-## 📄 License
+Clippy is still a personal project and local prototype. The most important remaining product decisions are packaging, update flow, paid distribution model, and whether to add account-based licensing.
+
+## License
 
 MIT

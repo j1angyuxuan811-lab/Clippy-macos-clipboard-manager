@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"clippy-backend/internal/buildinfo"
+	"clippy-backend/internal/clipboard"
 	"clippy-backend/internal/config"
 	"clippy-backend/internal/db"
 
@@ -45,6 +47,7 @@ func (s *Server) routes(staticDir string) {
 			// Allow static UI files and images without token (served to local WebView)
 			path := r.URL.Path
 			isAPI := strings.HasPrefix(path, "/api/")
+			isSensitiveAsset := strings.HasPrefix(path, "/images/")
 
 			// Tighten CORS — only allow local origins
 			origin := r.Header.Get("Origin")
@@ -71,11 +74,8 @@ func (s *Server) routes(staticDir string) {
 			}
 
 			// Token validation for API routes (except /api/health for liveness check)
-			if isAPI && path != "/api/health" {
+			if (isAPI && path != "/api/health") || isSensitiveAsset {
 				token := r.Header.Get("X-Clippy-Token")
-				if token == "" {
-					token = r.URL.Query().Get("token")
-				}
 				if token != s.apiToken {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
@@ -101,6 +101,7 @@ func (s *Server) routes(staticDir string) {
 	api.HandleFunc("/settings", s.handleUpdateSettings).Methods("PUT")
 	api.HandleFunc("/pause", s.handlePause).Methods("POST")
 	api.HandleFunc("/resume", s.handleResume).Methods("POST")
+	api.HandleFunc("/privacy/status", s.handlePrivacyStatus).Methods("GET")
 
 	// Image serving
 	s.router.HandleFunc("/images/{filename}", s.handleImage).Methods("GET")
@@ -321,7 +322,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	paused := config.IsPaused()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "ok",
-		"version": "1.2.1",
+		"version": buildinfo.Version,
 		"paused":  paused,
 	})
 }
@@ -335,6 +336,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"paste_directly":  cfg.PasteDirectly,
 		"paused_until":    cfg.PausedUntil,
 		"is_paused":       config.IsPaused(),
+		"hotkey_combo":    cfg.HotkeyCombo,
 	}
 	json.NewEncoder(w).Encode(response)
 }
@@ -368,8 +370,8 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	config.Pause(time.Duration(req.Minutes) * time.Minute)
 	log.Printf("⏸️ Recording paused for %d minutes", req.Minutes)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":      "paused",
-		"minutes":     req.Minutes,
+		"status":       "paused",
+		"minutes":      req.Minutes,
 		"paused_until": config.Get().PausedUntil,
 	})
 }
@@ -378,6 +380,10 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	config.Resume()
 	log.Printf("▶️ Recording resumed")
 	json.NewEncoder(w).Encode(map[string]string{"status": "resumed"})
+}
+
+func (s *Server) handlePrivacyStatus(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(clipboard.CurrentStatus())
 }
 
 func (s *Server) handleDeleteRecent(w http.ResponseWriter, r *http.Request) {

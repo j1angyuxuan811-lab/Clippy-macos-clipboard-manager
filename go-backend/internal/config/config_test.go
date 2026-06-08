@@ -92,6 +92,15 @@ func TestIsAppIgnored(t *testing.T) {
 	if !IsAppIgnored("com.1password.1password") {
 		t.Error("expected com.1password.1password to be ignored")
 	}
+	if !IsAppIgnored("com.apple.systempreferences") {
+		t.Error("expected System Settings to be ignored")
+	}
+	if !IsAppIgnored("com.apple.Passbook") {
+		t.Error("expected Wallet to be ignored")
+	}
+	if !IsAppIgnored("com.tencent.xinWeChat") {
+		t.Error("expected WeChat to be ignored as a work-content sensitive source")
+	}
 	if IsAppIgnored("com.apple.finder") {
 		t.Error("expected com.apple.finder to NOT be ignored")
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 
 	"clippy-backend/internal/api"
+	"clippy-backend/internal/buildinfo"
 	"clippy-backend/internal/clipboard"
 	"clippy-backend/internal/db"
 )
@@ -24,11 +26,7 @@ func main() {
 	dataDir := flag.String("data", "./data", "Data directory")
 	staticDir := flag.String("static", "./ui-prototype", "Static files directory")
 	imagesDir := flag.String("images", "./data/images", "Images directory")
-	launchctl := flag.Bool("launchctl", false, "Run in launchctl mode (no stdin)")
 	flag.Parse()
-
-	// Suppress unused variable warning
-	_ = *launchctl
 
 	_ = os.MkdirAll(*dataDir, 0755)
 	_ = os.MkdirAll(*imagesDir, 0755)
@@ -101,6 +99,15 @@ func isBackendAlive(port string) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-	return resp.StatusCode == 200
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false
+	}
+	var health struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		return false
+	}
+	return health.Version == buildinfo.Version
 }

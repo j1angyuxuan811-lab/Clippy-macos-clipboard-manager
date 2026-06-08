@@ -12,8 +12,9 @@ type Config struct {
 	RetentionHours int      `json:"retention_hours"` // 0 = keep forever
 	IgnoredApps    []string `json:"ignored_apps"`    // bundle IDs to ignore
 	MaxItems       int      `json:"max_items"`
-	PasteDirectly  bool     `json:"paste_directly"`  // simulate Cmd+V after copy
-	PausedUntil    string   `json:"paused_until"`    // ISO8601 timestamp; recording paused until this time
+	PasteDirectly  bool     `json:"paste_directly"` // simulate Cmd+V after copy
+	PausedUntil    string   `json:"paused_until"`   // ISO8601 timestamp; recording paused until this time
+	HotkeyCombo    string   `json:"hotkey_combo"`   // primary panel shortcut
 }
 
 // Default sensitive apps that should be ignored
@@ -21,10 +22,16 @@ var DefaultIgnoredApps = []string{
 	"com.1password.1password",
 	"com.agilebits.onepassword7",
 	"com.apple.keychainaccess",
+	"com.apple.systempreferences",
+	"com.apple.systemsettings",
+	"com.apple.Passbook",
 	"com.lastpass.LastPass",
 	"com.bitwarden.desktop",
 	"com.dashlane.dashlanephonefinal",
 	"org.keepassxc.keepassxc",
+	"com.tencent.xinWeChat",
+	"com.tencent.qq",
+	"com.alipay.iphoneclient",
 }
 
 var (
@@ -40,6 +47,7 @@ func defaults() *Config {
 		MaxItems:       1000,
 		PasteDirectly:  true,
 		PausedUntil:    "",
+		HotkeyCombo:    "⌘⇧V",
 	}
 }
 
@@ -62,6 +70,9 @@ func Load(dataDir string) *Config {
 	// Ensure valid values
 	if current.MaxItems <= 0 {
 		current.MaxItems = 1000
+	}
+	if current.HotkeyCombo == "" {
+		current.HotkeyCombo = "⌘⇧V"
 	}
 	// Migration: if ignored_apps is nil OR empty, populate with defaults.
 	// This ensures existing users who saved an empty list get the privacy baseline.
@@ -89,6 +100,9 @@ func Update(newCfg *Config) error {
 
 	if newCfg.MaxItems <= 0 {
 		newCfg.MaxItems = 1000
+	}
+	if newCfg.HotkeyCombo == "" {
+		newCfg.HotkeyCombo = "⌘⇧V"
 	}
 	if newCfg.IgnoredApps == nil {
 		newCfg.IgnoredApps = append([]string{}, DefaultIgnoredApps...)

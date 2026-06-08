@@ -2,9 +2,10 @@
 set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="$ROOT/build/Clippy.app"
+APP="$ROOT/.clippy-build/Clippy.app"
 GO_BIN="$ROOT/go-backend"
 BUNDLE_ID="com.iris.clippy"
+VERSION="1.2.1"
 
 echo "🔨 Building Go backend..."
 cd "$GO_BIN"
@@ -46,9 +47,9 @@ cat > "$APP/Contents/Info.plist" << EOF
     <key>CFBundleExecutable</key>
     <string>Clippy</string>
     <key>CFBundleVersion</key>
-    <string>1.2.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2.0</string>
+    <string>${VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -61,15 +62,26 @@ cat > "$APP/Contents/Info.plist" << EOF
 </plist>
 EOF
 
-# Code sign with stable identity (ad-hoc) — keeps accessibility permission across rebuilds
-echo "🔏 Signing with stable identifier ($BUNDLE_ID)..."
-codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP"
+# Prefer a stable local identity so macOS Accessibility (TCC) permissions survive rebuilds.
+SIGN_IDENTITY="${CLIPPY_CODESIGN_IDENTITY:-}"
+if [ -z "$SIGN_IDENTITY" ]; then
+  SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Clippy Local Code Signing/ { print $2; exit }')"
+fi
 
-# Prevent Spotlight from indexing the build directory (avoids duplicate in Launchpad)
-touch "$ROOT/build/.metadata_never_index"
+if [ -n "$SIGN_IDENTITY" ]; then
+  echo "🔏 Signing with stable identity: $SIGN_IDENTITY"
+  codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+else
+  echo "⚠️ No stable code signing identity found; falling back to ad-hoc signing."
+  echo "⚠️ Accessibility permission may need to be re-enabled after each rebuild."
+  ADHOC_IDENTITY="-"
+  codesign --force --deep --sign "$ADHOC_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+fi
+
+# Keep the staging bundle hidden and out of Spotlight so it does not appear as a second app.
+touch "$ROOT/.clippy-build/.metadata_never_index"
 
 echo "✅ Build complete: $APP"
 echo ""
 echo "Install:"
-echo "  cp -r \"$APP\" /Applications/"
-echo "  open /Applications/Clippy.app"
+echo "  ./install.sh"

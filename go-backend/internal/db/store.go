@@ -24,7 +24,8 @@ type Item struct {
 }
 
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	dataDir string
 }
 
 func New(dbPath string) (*Store, error) {
@@ -33,7 +34,7 @@ func New(dbPath string) (*Store, error) {
 		return nil, err
 	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, dataDir: filepath.Dir(dbPath)}
 	s.init()
 	return s, nil
 }
@@ -139,7 +140,7 @@ func (s *Store) Delete(id int) error {
 
 	// Delete associated image file
 	if imagePath != "" {
-		_ = os.Remove(imagePath)
+		_ = os.Remove(s.imageFilePath(imagePath))
 	}
 
 	return err
@@ -205,7 +206,7 @@ func (s *Store) cleanup() {
 				s.db.Exec("DELETE FROM items WHERE id = ?", id)
 			}
 			for _, path := range paths {
-				_ = os.Remove(path)
+				_ = os.Remove(s.imageFilePath(path))
 			}
 			if len(ids) > 0 {
 				log.Printf("🧹 Cleaned up %d items older than %d hours", len(ids), cfg.RetentionHours)
@@ -246,7 +247,7 @@ func (s *Store) cleanup() {
 		s.db.Exec("DELETE FROM items WHERE id = ?", id)
 	}
 	for _, path := range paths2 {
-		_ = os.Remove(path)
+		_ = os.Remove(s.imageFilePath(path))
 	}
 
 	if len(ids2) > 0 {
@@ -286,7 +287,7 @@ func (s *Store) CleanupExpired() {
 		s.db.Exec("DELETE FROM items WHERE id = ?", id)
 	}
 	for _, path := range paths {
-		_ = os.Remove(path)
+		_ = os.Remove(s.imageFilePath(path))
 	}
 	if len(ids) > 0 {
 		log.Printf("🧹 Startup: cleaned %d expired items (retention: %d hours)", len(ids), cfg.RetentionHours)
@@ -335,6 +336,9 @@ func (s *Store) CleanupOrphanImages(imagesDir string) {
 func (s *Store) ImageDirSize(imagesDir string) int64 {
 	var size int64
 	_ = filepath.Walk(imagesDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
 		if !info.IsDir() {
 			size += info.Size()
 		}
@@ -360,11 +364,12 @@ func (s *Store) EnforceImageLimit(imagesDir string, maxBytes int64) {
 		var path string
 		rows.Scan(&id, &path)
 		if path != "" {
-			if info, err := os.Stat(path); err == nil {
-				_ = os.Remove(path)
+			fullPath := s.imageFilePath(path)
+			if info, err := os.Stat(fullPath); err == nil {
+				_ = os.Remove(fullPath)
 				size -= info.Size()
 				s.db.Exec("UPDATE items SET image_path = '' WHERE id = ?", id)
-				log.Printf("🗑️ Evicted image: %s", filepath.Base(path))
+				log.Printf("🗑️ Evicted image: %s", filepath.Base(fullPath))
 			}
 		}
 	}
@@ -401,7 +406,14 @@ func (s *Store) DeleteRecent(minutes int) (int, error) {
 		s.db.Exec("DELETE FROM items WHERE id = ?", id)
 	}
 	for _, path := range paths {
-		_ = os.Remove(path)
+		_ = os.Remove(s.imageFilePath(path))
 	}
 	return len(ids), nil
+}
+
+func (s *Store) imageFilePath(imagePath string) string {
+	if imagePath == "" || filepath.IsAbs(imagePath) {
+		return imagePath
+	}
+	return filepath.Join(s.dataDir, "images", filepath.Base(imagePath))
 }

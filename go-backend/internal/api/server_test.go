@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"clippy-backend/internal/buildinfo"
 	"clippy-backend/internal/db"
 )
 
@@ -42,8 +43,8 @@ func TestHealthNoTokenRequired(t *testing.T) {
 
 	var resp map[string]interface{}
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["version"] != "1.2.1" {
-		t.Errorf("expected version 1.2.1, got %v", resp["version"])
+	if resp["version"] != buildinfo.Version {
+		t.Errorf("expected version %s, got %v", buildinfo.Version, resp["version"])
 	}
 }
 
@@ -55,11 +56,19 @@ func TestAPIRequiresToken(t *testing.T) {
 		path   string
 	}{
 		{"GET", "/api/clips"},
+		{"POST", "/api/clips"},
+		{"POST", "/api/clips/image"},
+		{"DELETE", "/api/clips/1"},
+		{"PUT", "/api/clips/1/pin"},
+		{"POST", "/api/clips/1/copy"},
+		{"DELETE", "/api/clips/recent"},
+		{"GET", "/api/clips/export"},
 		{"GET", "/api/settings"},
 		{"PUT", "/api/settings"},
 		{"POST", "/api/pause"},
 		{"POST", "/api/resume"},
-		{"GET", "/api/clips/export"},
+		{"GET", "/api/privacy/status"},
+		{"GET", "/images/test.png"},
 	}
 
 	for _, ep := range endpoints {
@@ -70,6 +79,25 @@ func TestAPIRequiresToken(t *testing.T) {
 		if w.Code != 401 {
 			t.Errorf("%s %s: expected 401 without token, got %d", ep.method, ep.path, w.Code)
 		}
+	}
+}
+
+func TestImagesRequireToken(t *testing.T) {
+	srv, token := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/images/test.png", nil)
+	w := httptest.NewRecorder()
+	srv.router.ServeHTTP(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected image request without token to return 401, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest("GET", "/images/test.png", nil)
+	req.Header.Set("X-Clippy-Token", token)
+	w = httptest.NewRecorder()
+	srv.router.ServeHTTP(w, req)
+	if w.Code != 404 {
+		t.Fatalf("expected authorized missing image to return 404, got %d", w.Code)
 	}
 }
 
@@ -86,15 +114,15 @@ func TestAPIAcceptsValidToken(t *testing.T) {
 	}
 }
 
-func TestAPIAcceptsTokenInQuery(t *testing.T) {
+func TestAPIRejectsTokenInQuery(t *testing.T) {
 	srv, token := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/api/clips?token="+token, nil)
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
 
-	if w.Code != 200 {
-		t.Errorf("expected 200 with token in query, got %d", w.Code)
+	if w.Code != 401 {
+		t.Errorf("expected 401 with token in query, got %d", w.Code)
 	}
 }
 
